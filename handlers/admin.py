@@ -1,4 +1,5 @@
 from aiogram import Router, F
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from sqlalchemy import select, func
@@ -8,6 +9,7 @@ from database.models import User, RoleEnum, Course, CourseStatus, Payment, Payme
 from states.teacher_states import PromoteTeacher, AddCard
 from utils.payments import approve_payment, reject_payment, notify_student_approved, notify_student_rejected
 from utils.format import fmt_money, fmt_date, DIVIDER
+from config import ADMIN_IDS
 
 router = Router()
 
@@ -20,6 +22,44 @@ async def _require_admin(message: Message) -> User | None:
         await message.answer("Bu bo'lim faqat adminlar uchun.")
         return None
     return user
+
+
+@router.message(Command("admin"))
+async def open_admin_panel(message: Message) -> None:
+    """To'g'ridan-to'g'ri admin panelga kirish uchun tezkor buyruq.
+
+    ADMIN_IDS'ga qo'shilgan bo'lsangiz, DB'dagi eski rolni ham avtomatik
+    ADMIN'ga ko'taradi (masalan, avval oddiy o'quvchi sifatida start bosgan
+    bo'lsangiz)."""
+    from keyboards.common import admin_main_menu
+
+    telegram_id = message.from_user.id
+
+    async with async_session() as session:
+        result = await session.execute(select(User).where(User.telegram_id == telegram_id))
+        user = result.scalar_one_or_none()
+
+        if not user:
+            await message.answer("Avval /start bosing, keyin qaytadan /admin yuboring.")
+            return
+
+        if telegram_id in ADMIN_IDS and user.role != RoleEnum.ADMIN:
+            user.role = RoleEnum.ADMIN
+            await session.commit()
+
+        is_admin = user.role == RoleEnum.ADMIN
+
+    if not is_admin:
+        await message.answer(
+            "⛔️ Sizda admin huquqi yo'q.\n\n"
+            f"🆔 Sizning Telegram ID'ingiz: <code>{telegram_id}</code>\n\n"
+            "Admin bo'lish uchun bu ID'ni Railway (yoki serveringiz) muhit "
+            "o'zgaruvchilarida <code>ADMIN_IDS</code> qiymatiga qo'shing, "
+            "botni qayta ishga tushiring va yana /admin yuboring."
+        )
+        return
+
+    await message.answer("🛠 <b>Admin panel</b>", reply_markup=admin_main_menu())
 
 
 @router.message(F.text == "📊 Dashboard")

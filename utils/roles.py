@@ -1,4 +1,5 @@
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from database.db import async_session
 from database.models import User, RoleEnum
@@ -10,6 +11,14 @@ async def get_or_create_user(telegram_id: int, full_name: str, username: str) ->
         result = await session.execute(select(User).where(User.telegram_id == telegram_id))
         user = result.scalar_one_or_none()
         if user:
+            # ADMIN_IDS .env'ga keyinchalik qo'shilgan bo'lsa ham, foydalanuvchi
+            # avval STUDENT sifatida yaratilgan bo'lishi mumkin. Har /start bosilganda
+            # ADMIN_IDS bilan qayta tekshirib, kerak bo'lsa avtomatik ADMIN qilamiz
+            # (aksincha — adminni pasaytirib qo'ymaymiz, faqat ko'taramiz).
+            if telegram_id in ADMIN_IDS and user.role != RoleEnum.ADMIN:
+                user.role = RoleEnum.ADMIN
+                await session.commit()
+                await session.refresh(user)
             return user
 
         role = RoleEnum.ADMIN if telegram_id in ADMIN_IDS else RoleEnum.STUDENT
@@ -20,7 +29,20 @@ async def get_or_create_user(telegram_id: int, full_name: str, username: str) ->
             role=role,
         )
         session.add(user)
-        await session.commit()
+        try:
+            await session.commit()
+        except IntegrityError:
+            # Bir xil foydalanuvchi uchun deyarli bir vaqtda kelgan 2 ta update
+            # (masalan, Telegramdan qayta yuborilgan/tezkor 2 marta bosilgan
+            # xabar) ikkalasi ham shu yerga yetib kelishi mumkin. Birinchisi
+            # muvaffaqiyatli INSERT qiladi, ikkinchisi UNIQUE cheklovga uriladi —
+            # bunda bot qulamasligi uchun endi shunchaki mavjud qatorni o'qib qaytaramiz.
+            await session.rollback()
+            result = await session.execute(select(User).where(User.telegram_id == telegram_id))
+            user = result.scalar_one_or_none()
+            if user:
+                return user
+            raise
         await session.refresh(user)
         return user
 

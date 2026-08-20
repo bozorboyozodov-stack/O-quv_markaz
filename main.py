@@ -9,6 +9,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from config import BOT_TOKEN
 from database.db import init_db
 from handlers import start, student, teacher, admin
+from utils.dedup_middleware import DedupMiddleware
 
 logging.basicConfig(level=logging.INFO)
 
@@ -21,6 +22,11 @@ async def main() -> None:
 
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher(storage=MemoryStorage())
+
+    # Bir xil update (masalan tarmoq sekinligi tufayli Telegram tomonidan
+    # qayta yuborilgan xabar) ikki marta ishlanib, botning ikki marta javob
+    # berishining oldini oladi.
+    dp.update.outer_middleware(DedupMiddleware())
 
     # Tartib muhim: aniqroq handlerlar (start, admin, teacher) oldin,
     # umumiy student handlerlari keyin ulanadi.
