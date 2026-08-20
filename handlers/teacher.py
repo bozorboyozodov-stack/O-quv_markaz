@@ -95,23 +95,36 @@ async def cc_category(message: Message, state: FSMContext) -> None:
         result = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
         teacher = result.scalar_one_or_none()
 
+        # Admin o'zi yaratgan kursni moderatsiyasiz to'g'ridan-to'g'ri
+        # tasdiqlangan holatda ochadi (o'zini-o'zi tekshirishning hojati yo'q).
+        # Oddiy o'qituvchi yaratgan kurs hamon 🟡 moderatsiyaga boradi.
+        is_admin = teacher.role == RoleEnum.ADMIN
+        status = CourseStatus.APPROVED if is_admin else CourseStatus.PENDING
+
         course = Course(
             teacher_id=teacher.id,
             title=data["title"],
             description=data["description"],
             price=data["price"],
             category=data["category"],
-            status=CourseStatus.PENDING,
+            status=status,
         )
         session.add(course)
         await session.commit()
 
-    await message.answer(
-        f"✅ <b>{course.title}</b> kursi yaratildi va 🟡 <b>moderatsiyaga</b> yuborildi.\n\n"
-        f"💰 {fmt_money(course.price)} · 📂 {course.category}\n\n"
-        "Admin tasdiqlagach, kurs katalogda ko'rinadi. Shu orada '🎥 Dars qo'shish' "
-        "orqali modul va darslarni tayyorlab qo'yishingiz mumkin."
-    )
+    if is_admin:
+        await message.answer(
+            f"✅ <b>{course.title}</b> kursi yaratildi va darhol ✅ <b>tasdiqlangan</b> holatda katalogga qo'shildi.\n\n"
+            f"💰 {fmt_money(course.price)} · 📂 {course.category}\n\n"
+            "Endi '🎥 Dars qo'shish' orqali modul va darslarni qo'shishingiz mumkin."
+        )
+    else:
+        await message.answer(
+            f"✅ <b>{course.title}</b> kursi yaratildi va 🟡 <b>moderatsiyaga</b> yuborildi.\n\n"
+            f"💰 {fmt_money(course.price)} · 📂 {course.category}\n\n"
+            "Admin tasdiqlagach, kurs katalogda ko'rinadi. Shu orada '🎥 Dars qo'shish' "
+            "orqali modul va darslarni tayyorlab qo'yishingiz mumkin."
+        )
 
 
 @router.message(F.text == "💰 Daromadim")
@@ -312,11 +325,24 @@ async def lesson_video_received(message: Message, state: FSMContext, bot: Bot) -
 
     # Videoni yashirin storage kanalga ko'chiramiz — asl fayl hech qachon
     # to'g'ridan-to'g'ri o'quvchiga (yoki uning linkiga) berilmaydi.
-    copied = await bot.copy_message(
-        chat_id=config.STORAGE_CHANNEL_ID,
-        from_chat_id=message.chat.id,
-        message_id=message.message_id,
-    )
+    try:
+        copied = await bot.copy_message(
+            chat_id=config.STORAGE_CHANNEL_ID,
+            from_chat_id=message.chat.id,
+            message_id=message.message_id,
+        )
+    except Exception as e:
+        await state.clear()
+        await progress_msg.edit_text(
+            "❌ <b>Video yuklashda xatolik yuz berdi.</b>\n\n"
+            f"<code>{e}</code>\n\n"
+            "Tekshiring:\n"
+            "1️⃣ Bot STORAGE kanaliga <b>admin</b> qilib qo'shilganmi?\n"
+            "2️⃣ Kanalga xabar yuborish (post) huquqi berilganmi?\n"
+            "3️⃣ .env/Railow'dagi <code>STORAGE_CHANNEL_ID</code> to'g'ri (masalan -100 bilan boshlanadigan)mi?\n\n"
+            "Tuzatgach, '🎥 Dars qo'shish' orqali qaytadan urinib ko'ring."
+        )
+        return
 
     async with async_session() as session:
         result = await session.execute(select(Lesson).where(Lesson.module_id == module_id))
@@ -720,11 +746,21 @@ async def save_lesson_video(message: Message, state: FSMContext, bot: Bot) -> No
 
     progress_msg = await message.answer("⏳ Yangi video yuklanmoqda...\n[■■■■■■■■■■] 100%")
 
-    copied = await bot.copy_message(
-        chat_id=config.STORAGE_CHANNEL_ID,
-        from_chat_id=message.chat.id,
-        message_id=message.message_id,
-    )
+    try:
+        copied = await bot.copy_message(
+            chat_id=config.STORAGE_CHANNEL_ID,
+            from_chat_id=message.chat.id,
+            message_id=message.message_id,
+        )
+    except Exception as e:
+        await state.clear()
+        await progress_msg.edit_text(
+            "❌ <b>Video yuklashda xatolik yuz berdi.</b>\n\n"
+            f"<code>{e}</code>\n\n"
+            "Bot STORAGE kanaliga admin qilib qo'shilganmi va "
+            "<code>STORAGE_CHANNEL_ID</code> to'g'ri sozlanganmi — tekshiring."
+        )
+        return
 
     async with async_session() as session:
         lesson = await session.get(Lesson, lesson_id)
