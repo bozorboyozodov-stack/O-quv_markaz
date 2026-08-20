@@ -33,7 +33,7 @@ def admin_main_menu() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="📊 Dashboard"), KeyboardButton(text="🟡 Moderatsiyadagi kurslar")],
             [KeyboardButton(text="👨‍🏫 O'qituvchi qo'shish"), KeyboardButton(text="👨‍🎓 O'quvchilar")],
             [KeyboardButton(text="💳 Kartalar")],
-            [KeyboardButton(text="👨‍🎓 O'quvchi rejimi")],
+            [KeyboardButton(text="👨‍🏫 O'qituvchi rejimi"), KeyboardButton(text="👨‍🎓 O'quvchi rejimi")],
         ],
         resize_keyboard=True,
     )

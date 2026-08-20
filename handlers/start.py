@@ -46,3 +46,18 @@ async def switch_to_student_view(message: Message) -> None:
     """Teacher/Admin bir zumda o'quvchi menyusini ham ko'rishi uchun (test qulayligi)."""
     from keyboards.common import student_main_menu
     await message.answer("👨‍🎓 O'quvchi menyusiga o'tdingiz:", reply_markup=student_main_menu())
+
+
+@router.message(F.text == "👨‍🏫 O'qituvchi rejimi")
+async def switch_to_teacher_view(message: Message) -> None:
+    """Admin kurs/dars(video) qo'shish kabi o'qituvchi funksiyalaridan
+    to'g'ridan-to'g'ri foydalanishi uchun (handlers/teacher.py o'qituvchi
+    funksiyalarini ADMIN roliga ham ruxsat beradi).
+    Asosiy admin menyusiga qaytish uchun /start yoki /admin yuboring."""
+    from keyboards.common import teacher_main_menu
+    await message.answer(
+        "👨‍🏫 O'qituvchi menyusiga o'tdingiz.\n"
+        "Bu yerdan kurs yaratishingiz va darslarga video qo'shishingiz mumkin.\n\n"
+        "Admin panelga qaytish uchun /admin yuboring.",
+        reply_markup=teacher_main_menu(),
+    )
