@@ -6,7 +6,9 @@ from database.models import User, RoleEnum
 from config import ADMIN_IDS, OWNER_ID
 
 
-async def get_or_create_user(telegram_id: int, full_name: str, username: str) -> User:
+async def get_or_create_user(telegram_id: int, full_name: str, username: str) -> tuple[User, bool]:
+    """Qaytaradi: (user, created). created=True — foydalanuvchi shu chaqiriqda
+    birinchi marta DB'ga qo'shildi (ya'ni haqiqatan yangi obunachi)."""
     async with async_session() as session:
         result = await session.execute(select(User).where(User.telegram_id == telegram_id))
         user = result.scalar_one_or_none()
@@ -19,7 +21,7 @@ async def get_or_create_user(telegram_id: int, full_name: str, username: str) ->
                 user.role = RoleEnum.ADMIN
                 await session.commit()
                 await session.refresh(user)
-            return user
+            return user, False
 
         role = RoleEnum.ADMIN if telegram_id in ADMIN_IDS else RoleEnum.STUDENT
         user = User(
@@ -41,10 +43,10 @@ async def get_or_create_user(telegram_id: int, full_name: str, username: str) ->
             result = await session.execute(select(User).where(User.telegram_id == telegram_id))
             user = result.scalar_one_or_none()
             if user:
-                return user
+                return user, False
             raise
         await session.refresh(user)
-        return user
+        return user, True
 
 
 async def get_user(telegram_id: int) -> User | None:

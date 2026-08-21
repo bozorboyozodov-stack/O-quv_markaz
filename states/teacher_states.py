@@ -9,7 +9,11 @@ class CreateCourse(StatesGroup):
 
 
 class PromoteTeacher(StatesGroup):
-    waiting_telegram_id = State()
+    waiting_username = State()
+
+
+class PromoteAdmin(StatesGroup):
+    waiting_username = State()
 
 
 class AddCard(StatesGroup):
@@ -46,3 +50,9 @@ class RequestWithdrawal(StatesGroup):
 class RejectWithdrawal(StatesGroup):
     """Admin pul yechish so'rovini rad etayotganda sabab yozadi."""
     waiting_reason = State()
+
+
+class EditSupportContact(StatesGroup):
+    """Admin '💬 Yordam' bo'limida ko'rinadigan aloqa (username yoki guruh
+    linki) ni o'zgartirayotganda."""
+    waiting_value = State()

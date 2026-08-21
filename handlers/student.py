@@ -15,6 +15,7 @@ from utils.lessons import (
     get_ordered_lessons, get_completed_lesson_ids, mark_lesson_completed, recalculate_enrollment_progress,
 )
 from utils.certificates import issue_certificate_if_completed, render_certificate_pdf
+from utils.settings import get_setting, resolve_contact_url, SUPPORT_CONTACT_KEY
 
 router = Router()
 
@@ -682,8 +683,15 @@ async def my_profile(message: Message) -> None:
 
 @router.message(F.text == "💬 Yordam")
 async def help_message(message: Message) -> None:
-    await message.answer(
+    contact_value = await get_setting(SUPPORT_CONTACT_KEY, default=f"@{config.SUPPORT_USERNAME}")
+    contact_url = resolve_contact_url(contact_value) or f"https://t.me/{config.SUPPORT_USERNAME}"
+
+    text = (
         "💬 <b>Yordam</b>\n\n"
         "Savol yoki muammo bo'lsa, bemalol yozing:\n"
-        f"👉 @{config.SUPPORT_USERNAME}"
+        f"👉 {contact_value}"
     )
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✍️ Adminga yozish", url=contact_url),
+    ]])
+    await message.answer(text, reply_markup=kb)

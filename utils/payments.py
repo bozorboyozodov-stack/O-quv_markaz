@@ -11,6 +11,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.models import Payment, PaymentStatus, Enrollment, User, Course
+from utils.format import fmt_money
+from utils.roles import get_admin_telegram_ids
 
 
 async def approve_payment(session: AsyncSession, payment: Payment, admin: User) -> bool:
@@ -77,3 +79,47 @@ async def notify_student_rejected(bot, session: AsyncSession, payment: Payment) 
         )
     except Exception:
         pass
+
+
+async def notify_admins_course_sold(bot, session: AsyncSession, payment: Payment) -> None:
+    """Kurs sotib olinib, admin tasdiqlagach — barcha adminlarga xabar beradi:
+    ism(@username) (kurs nomi) kursini (miqdor) so'mga sotib oldi."""
+    student = await session.get(User, payment.student_id)
+    course = await session.get(Course, payment.course_id)
+    if not (student and course):
+        return
+
+    name = student.full_name or "—"
+    username = f"@{student.username}" if student.username else "—"
+    text = (
+        "💰 <b>Yangi sotuv</b>\n"
+        f"{name} ({username}) <b>{course.title}</b> kursini "
+        f"{fmt_money(payment.amount)}ga sotib oldi."
+    )
+    admin_ids = await get_admin_telegram_ids()
+    for admin_id in admin_ids:
+        try:
+            await bot.send_message(admin_id, text)
+        except Exception:
+            pass
+
+
+async def notify_teacher_course_sold(bot, session: AsyncSession, payment: Payment) -> None:
+    """O'z yuklagan kursi sotilganda o'qituvchiga xabar beradi."""
+    teacher = await session.get(User, payment.teacher_id)
+    course = await session.get(Course, payment.course_id)
+    student = await session.get(User, payment.student_id)
+    if not (teacher and course and student):
+        return
+
+    name = student.full_name or "—"
+    username = f"@{student.username}" if student.username else "—"
+    try:
+        await bot.send_message(
+            teacher.telegram_id,
+            "🎉 <b>Kursingiz sotildi!</b>\n"
+            f"{name} ({username}) <b>{course.title}</b> kursini "
+            f"{fmt_money(payment.amount)}ga sotib oldi.",
+        )
+    except Exception:
+        pass  # o'qituvchi botni bloklagan bo'lishi mumkin

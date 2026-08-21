@@ -3,7 +3,7 @@ from aiogram.filters import CommandStart
 from aiogram.types import Message
 
 from database.models import RoleEnum
-from utils.roles import get_or_create_user, get_user
+from utils.roles import get_or_create_user, get_user, get_admin_telegram_ids
 from keyboards.common import menu_for_role
 
 router = Router()
@@ -15,13 +15,35 @@ _ROLE_WELCOME = {
 }
 
 
+async def _notify_admins_new_subscriber(message: Message, user) -> None:
+    """Yangi obunachi DB'ga qo'shilganda barcha adminlarga xabar beradi."""
+    name = message.from_user.full_name or "—"
+    username = f"@{message.from_user.username}" if message.from_user.username else "—"
+    text = (
+        "🆕 <b>Yangi obunachi qo'shildi</b>\n"
+        f"{name} ({username})\n"
+        f"🆔 <code>{message.from_user.id}</code>"
+    )
+    admin_ids = await get_admin_telegram_ids()
+    for admin_id in admin_ids:
+        if admin_id == message.from_user.id:
+            continue
+        try:
+            await message.bot.send_message(admin_id, text)
+        except Exception:
+            pass  # admin botni bloklagan yoki hali /start bosmagan bo'lishi mumkin
+
+
 @router.message(CommandStart())
 async def cmd_start(message: Message) -> None:
-    user = await get_or_create_user(
+    user, created = await get_or_create_user(
         telegram_id=message.from_user.id,
         full_name=message.from_user.full_name,
         username=message.from_user.username or "",
     )
+
+    if created:
+        await _notify_admins_new_subscriber(message, user)
 
     first_name = message.from_user.first_name or "do'stim"
     role_line = _ROLE_WELCOME.get(user.role, "")

@@ -6,11 +6,17 @@ from sqlalchemy import select, func
 
 from database.db import async_session
 from database.models import User, RoleEnum, Course, CourseStatus, Payment, PaymentStatus, PaymentCard, Withdrawal, WithdrawalStatus, Enrollment
-from states.teacher_states import PromoteTeacher, AddCard, RejectWithdrawal
-from utils.payments import approve_payment, reject_payment, notify_student_approved, notify_student_rejected
+from states.teacher_states import PromoteTeacher, PromoteAdmin, AddCard, RejectWithdrawal, EditSupportContact
+from utils.payments import (
+    approve_payment, reject_payment,
+    notify_student_approved, notify_student_rejected,
+    notify_admins_course_sold, notify_teacher_course_sold,
+)
 from utils.withdrawals import approve_withdrawal, reject_withdrawal, notify_teacher_withdrawal_approved, notify_teacher_withdrawal_rejected, get_admin_balance
 from utils.income import get_income_summary
 from utils.format import fmt_money, fmt_date, DIVIDER
+from utils.settings import get_setting, set_setting, resolve_contact_url, SUPPORT_CONTACT_KEY
+import config
 from config import ADMIN_IDS
 
 router = Router()
@@ -209,36 +215,237 @@ async def reject_course(callback: CallbackQuery) -> None:
     await callback.answer("Kurs rad etildi")
 
 
-@router.message(F.text == "👨‍🏫 O'qituvchi qo'shish")
-async def start_promote(message: Message, state: FSMContext) -> None:
+async def _resolve_user_by_username(session, raw: str) -> User | None:
+    username = (raw or "").strip().lstrip("@")
+    if not username:
+        return None
+    result = await session.execute(select(User).where(func.lower(User.username) == username.lower()))
+    return result.scalar_one_or_none()
+
+
+# ------------------------------------------------------------------
+# 👨‍🏫 O'qituvchilar — ro'yxat / qo'shish (@username) / olib tashlash
+# ------------------------------------------------------------------
+def _teacher_manage_kb(teacher_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🗑 Olib tashlash", callback_data=f"tch_del:{teacher_id}"),
+    ]])
+
+
+@router.message(F.text == "👨‍🏫 O'qituvchilar")
+async def list_teachers(message: Message) -> None:
     if not await _require_admin(message):
         return
-    await state.set_state(PromoteTeacher.waiting_telegram_id)
+
+    async with async_session() as session:
+        result = await session.execute(
+            select(User).where(User.role == RoleEnum.TEACHER).order_by(User.full_name)
+        )
+        teachers = result.scalars().all()
+
+    if not teachers:
+        await message.answer("📭 Hali o'qituvchilar yo'q.")
+    else:
+        await message.answer(f"👨‍🏫 <b>O'qituvchilar</b> ({len(teachers)} ta):")
+        for t in teachers:
+            text = f"{t.full_name or '—'} (@{t.username or '—'})\n🆔 <code>{t.telegram_id}</code>"
+            await message.answer(text, reply_markup=_teacher_manage_kb(t.id))
+
     await message.answer(
-        "👨‍🏫 <b>O'qituvchi qo'shish</b>\n\n"
-        "O'qituvchi qilmoqchi bo'lgan foydalanuvchining Telegram ID sini yuboring.\n"
-        "<i>(Foydalanuvchi botga kamida bir marta /start bosgan bo'lishi kerak)</i>"
+        "Yangi o'qituvchi qo'shish uchun tugmani bosing 👇",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="➕ O'qituvchi qo'shish", callback_data="tch_add"),
+        ]]),
     )
 
 
-@router.message(PromoteTeacher.waiting_telegram_id)
-async def finish_promote(message: Message, state: FSMContext) -> None:
+@router.callback_query(F.data == "tch_add")
+async def start_promote_teacher(callback: CallbackQuery, state: FSMContext) -> None:
+    admin = await _require_admin_user(callback)
+    if not admin:
+        return
+    await state.set_state(PromoteTeacher.waiting_username)
+    await callback.message.answer(
+        "👨‍🏫 <b>O'qituvchi qo'shish</b>\n\n"
+        "Foydalanuvchining Telegram <b>username</b>'ini yuboring "
+        "(masalan: <code>@ali_dev</code> yoki <code>ali_dev</code>).\n\n"
+        "<i>Foydalanuvchi botga kamida bir marta /start bosgan va Telegram "
+        "profilida username o'rnatgan bo'lishi kerak.</i>"
+    )
+    await callback.answer()
+
+
+@router.message(PromoteTeacher.waiting_username)
+async def finish_promote_teacher(message: Message, state: FSMContext) -> None:
     await state.clear()
-    if not message.text.isdigit():
-        await message.answer("⚠️ Telegram ID faqat raqamlardan iborat bo'lishi kerak.")
+    raw = (message.text or "").strip()
+    username = raw.lstrip("@")
+    if not username:
+        await message.answer("⚠️ Iltimos username yuboring (masalan: @ali_dev).")
         return
 
-    target_id = int(message.text)
     async with async_session() as session:
-        result = await session.execute(select(User).where(User.telegram_id == target_id))
-        user = result.scalar_one_or_none()
+        user = await _resolve_user_by_username(session, username)
         if not user:
-            await message.answer("❌ Bu ID bilan foydalanuvchi topilmadi.")
+            await message.answer(
+                f"❌ @{username} username'i bilan foydalanuvchi topilmadi.\n\n"
+                "U avval botga /start bosgan va Telegram profilida username "
+                "o'rnatgan bo'lishi kerak."
+            )
+            return
+        if user.role == RoleEnum.TEACHER:
+            await message.answer(f"ℹ️ <b>{user.full_name or username}</b> allaqachon o'qituvchi.")
             return
         user.role = RoleEnum.TEACHER
         await session.commit()
+        name = user.full_name or username
 
-    await message.answer(f"✅ <b>{user.full_name or target_id}</b> endi o'qituvchi (TEACHER) huquqiga ega.")
+    await message.answer(f"✅ <b>{name}</b> (@{username}) endi o'qituvchi (TEACHER) huquqiga ega.")
+
+
+@router.callback_query(F.data.startswith("tch_del:"))
+async def remove_teacher(callback: CallbackQuery) -> None:
+    admin = await _require_admin_user(callback)
+    if not admin:
+        return
+
+    teacher_id = int(callback.data.split(":")[1])
+    async with async_session() as session:
+        teacher = await session.get(User, teacher_id)
+        if not teacher or teacher.role != RoleEnum.TEACHER:
+            await callback.answer("O'qituvchi topilmadi", show_alert=True)
+            return
+        teacher.role = RoleEnum.STUDENT
+        await session.commit()
+        name = teacher.full_name or teacher.username or str(teacher.telegram_id)
+
+    await callback.message.edit_text(f"🗑 <b>{name}</b> o'qituvchilikdan olib tashlandi.")
+    await callback.answer("Olib tashlandi")
+
+
+# ------------------------------------------------------------------
+# 👑 Adminlar — ro'yxat / qo'shish (@username) / olib tashlash
+# ------------------------------------------------------------------
+def _admin_manage_kb(admin_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🗑 Olib tashlash", callback_data=f"adm_del:{admin_id}"),
+    ]])
+
+
+@router.message(F.text == "👑 Adminlar")
+async def list_admins(message: Message) -> None:
+    if not await _require_admin(message):
+        return
+
+    async with async_session() as session:
+        result = await session.execute(
+            select(User).where(User.role == RoleEnum.ADMIN).order_by(User.full_name)
+        )
+        admins = result.scalars().all()
+
+    await message.answer(f"👑 <b>Adminlar</b> ({len(admins)} ta):")
+    for a in admins:
+        env_note = (
+            "\n⚙️ <i>ADMIN_IDS'da qayd etilgan — olib tashlansa ham /admin "
+            "bosilganda avtomatik qayta admin bo'lib qoladi.</i>"
+            if a.telegram_id in config.ADMIN_IDS else ""
+        )
+        text = f"{a.full_name or '—'} (@{a.username or '—'})\n🆔 <code>{a.telegram_id}</code>{env_note}"
+        if a.telegram_id == message.from_user.id:
+            await message.answer(text + "\n\n<i>(bu — sizning hisobingiz)</i>")
+        else:
+            await message.answer(text, reply_markup=_admin_manage_kb(a.id))
+
+    await message.answer(
+        "Yangi admin qo'shish uchun tugmani bosing 👇",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="➕ Admin qo'shish", callback_data="adm_add"),
+        ]]),
+    )
+
+
+@router.callback_query(F.data == "adm_add")
+async def start_promote_admin(callback: CallbackQuery, state: FSMContext) -> None:
+    admin = await _require_admin_user(callback)
+    if not admin:
+        return
+    await state.set_state(PromoteAdmin.waiting_username)
+    await callback.message.answer(
+        "👑 <b>Admin qo'shish</b>\n\n"
+        "Foydalanuvchining Telegram <b>username</b>'ini yuboring "
+        "(masalan: <code>@ali_dev</code> yoki <code>ali_dev</code>).\n\n"
+        "<i>Foydalanuvchi botga kamida bir marta /start bosgan va Telegram "
+        "profilida username o'rnatgan bo'lishi kerak.</i>"
+    )
+    await callback.answer()
+
+
+@router.message(PromoteAdmin.waiting_username)
+async def finish_promote_admin(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    raw = (message.text or "").strip()
+    username = raw.lstrip("@")
+    if not username:
+        await message.answer("⚠️ Iltimos username yuboring (masalan: @ali_dev).")
+        return
+
+    async with async_session() as session:
+        user = await _resolve_user_by_username(session, username)
+        if not user:
+            await message.answer(
+                f"❌ @{username} username'i bilan foydalanuvchi topilmadi.\n\n"
+                "U avval botga /start bosgan va Telegram profilida username "
+                "o'rnatgan bo'lishi kerak."
+            )
+            return
+        if user.role == RoleEnum.ADMIN:
+            await message.answer(f"ℹ️ <b>{user.full_name or username}</b> allaqachon admin.")
+            return
+        user.role = RoleEnum.ADMIN
+        await session.commit()
+        name = user.full_name or username
+
+    await message.answer(f"✅ <b>{name}</b> (@{username}) endi admin huquqiga ega.")
+
+
+@router.callback_query(F.data.startswith("adm_del:"))
+async def remove_admin(callback: CallbackQuery) -> None:
+    admin = await _require_admin_user(callback)
+    if not admin:
+        return
+
+    target_id = int(callback.data.split(":")[1])
+    if target_id == admin.id:
+        await callback.answer("O'zingizni olib tashlay olmaysiz.", show_alert=True)
+        return
+
+    async with async_session() as session:
+        target = await session.get(User, target_id)
+        if not target or target.role != RoleEnum.ADMIN:
+            await callback.answer("Admin topilmadi", show_alert=True)
+            return
+
+        total_admins = (await session.execute(
+            select(func.count()).select_from(User).where(User.role == RoleEnum.ADMIN)
+        )).scalar_one()
+        if total_admins <= 1:
+            await callback.answer("Oxirgi adminni olib tashlab bo'lmaydi.", show_alert=True)
+            return
+
+        target.role = RoleEnum.STUDENT
+        await session.commit()
+        name = target.full_name or target.username or str(target.telegram_id)
+        in_env = target.telegram_id in config.ADMIN_IDS
+
+    note = ""
+    if in_env:
+        note = (
+            "\n\n⚠️ Bu foydalanuvchi ADMIN_IDS muhit o'zgaruvchisida ham bor — "
+            "/admin bosilsa, avtomatik qayta admin bo'lib qoladi. To'liq olib "
+            "tashlash uchun serveringizdagi ADMIN_IDS qiymatidan ham o'chiring."
+        )
+    await callback.message.edit_text(f"🗑 <b>{name}</b> adminlikdan olib tashlandi.{note}")
+    await callback.answer("Olib tashlandi")
 
 
 @router.message(F.text == "👨‍🎓 O'quvchilar")
@@ -451,6 +658,69 @@ async def delete_card(callback: CallbackQuery) -> None:
 
 
 # ------------------------------------------------------------------
+# 👤 Admin lichkasi — "💬 Yordam" bo'limida o'quvchi/o'qituvchiga ko'rinadigan
+# aloqa (admin username'i yoki guruh/kanal linki). Admin buni o'zi
+# bot ichidan o'zgartira oladi.
+# ------------------------------------------------------------------
+async def _current_contact_text() -> str:
+    value = await get_setting(SUPPORT_CONTACT_KEY, default=f"@{config.SUPPORT_USERNAME}")
+    return value
+
+
+@router.message(F.text == "👤 Admin lichkasi")
+async def show_support_contact(message: Message) -> None:
+    if not await _require_admin(message):
+        return
+
+    value = await _current_contact_text()
+    await message.answer(
+        "👤 <b>Admin lichkasi</b>\n"
+        f"{DIVIDER}\n"
+        "Bu — o'quvchi va o'qituvchilarga '💬 Yordam' bo'limida ko'rinadigan "
+        "aloqa. Xoxlasangiz shaxsiy username, xoxlasangiz guruh/kanal linkini "
+        "qo'yishingiz mumkin.\n\n"
+        f"📌 Hozirgi qiymat: <code>{value}</code>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="✏️ O'zgartirish", callback_data="support_contact_edit"),
+        ]]),
+    )
+
+
+@router.callback_query(F.data == "support_contact_edit")
+async def start_edit_support_contact(callback: CallbackQuery, state: FSMContext) -> None:
+    admin = await _require_admin_user(callback)
+    if not admin:
+        return
+    await state.set_state(EditSupportContact.waiting_value)
+    await callback.message.answer(
+        "✏️ Yangi qiymatni yuboring:\n\n"
+        "• Username: <code>@username</code> yoki <code>username</code>\n"
+        "• Guruh/kanal linki: <code>https://t.me/guruh_nomi</code> yoki "
+        "<code>https://t.me/+xxxxxxxxxx</code> (taklif linki)"
+    )
+    await callback.answer()
+
+
+@router.message(EditSupportContact.waiting_value)
+async def finish_edit_support_contact(message: Message, state: FSMContext) -> None:
+    value = (message.text or "").strip()
+    await state.clear()
+
+    if not value or not resolve_contact_url(value):
+        await message.answer(
+            "⚠️ Noto'g'ri format. Username (@username) yoki to'liq link "
+            "(https://t.me/...) yuboring."
+        )
+        return
+
+    await set_setting(SUPPORT_CONTACT_KEY, value)
+    await message.answer(
+        "✅ Admin lichkasi yangilandi.\n\n"
+        f"📌 Yangi qiymat: <code>{value}</code>"
+    )
+
+
+# ------------------------------------------------------------------
 # To'lov: chekni tasdiqlash / rad etish
 # ------------------------------------------------------------------
 async def _require_admin_user(callback: CallbackQuery) -> User | None:
@@ -481,6 +751,8 @@ async def confirm_payment(callback: CallbackQuery) -> None:
 
         await approve_payment(session, payment, admin)
         await notify_student_approved(callback.bot, session, payment)
+        await notify_admins_course_sold(callback.bot, session, payment)
+        await notify_teacher_course_sold(callback.bot, session, payment)
 
     caption = (callback.message.caption or callback.message.text or "") + "\n\n✅ TASDIQLANDI"
     try:
