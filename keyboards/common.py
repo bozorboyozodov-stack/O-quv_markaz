@@ -2,16 +2,21 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from database.models import RoleEnum
 
 
-def student_main_menu() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="📚 Kurslar"), KeyboardButton(text="🎓 Mening kurslarim")],
-            [KeyboardButton(text="📊 Progressim"), KeyboardButton(text="💳 To'lovlarim")],
-            [KeyboardButton(text="🏆 Sertifikatlarim")],
-            [KeyboardButton(text="👤 Profil"), KeyboardButton(text="💬 Yordam")],
-        ],
-        resize_keyboard=True,
-    )
+def student_main_menu(back_role: RoleEnum | None = None) -> ReplyKeyboardMarkup:
+    """back_role — agar TEACHER/ADMIN vaqtincha "O'quvchi rejimi"ga o'tgan bo'lsa,
+    o'z paneliga qaytish tugmasi shu yerda qo'shiladi (aks holda oddiy
+    o'quvchida bunday tugma umuman ko'rinmaydi)."""
+    keyboard = [
+        [KeyboardButton(text="📚 Kurslar"), KeyboardButton(text="🎓 Mening kurslarim")],
+        [KeyboardButton(text="📊 Progressim"), KeyboardButton(text="💳 To'lovlarim")],
+        [KeyboardButton(text="🏆 Sertifikatlarim")],
+        [KeyboardButton(text="👤 Profil"), KeyboardButton(text="💬 Yordam")],
+    ]
+    if back_role == RoleEnum.ADMIN:
+        keyboard.append([KeyboardButton(text="🛠 Admin panelga qaytish")])
+    elif back_role == RoleEnum.TEACHER:
+        keyboard.append([KeyboardButton(text="👨‍🏫 O'qituvchi rejimi")])
+    return ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
 
 def teacher_main_menu() -> ReplyKeyboardMarkup:

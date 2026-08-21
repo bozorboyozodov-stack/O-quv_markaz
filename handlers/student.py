@@ -126,10 +126,13 @@ async def watch_preview_lesson(callback: CallbackQuery, bot: Bot) -> None:
             return
 
     await callback.answer("🎬 Video yuborilmoqda...")
+    # protect_content=True — video boshqa chatga forward qilinmaydi va
+    # galereyaga/qurilmaga saqlab bo'lmaydi (Telegramning o'z himoyasi).
     await bot.copy_message(
         chat_id=callback.from_user.id,
         from_chat_id=lesson.video_chat_id,
         message_id=lesson.video_message_id,
+        protect_content=True,
     )
     await callback.message.answer(
         "☝️ Bu — bepul <b>preview</b> dars. To'liq kursni ko'rish uchun 🛒 sotib oling."
@@ -426,10 +429,13 @@ async def watch_lesson(callback: CallbackQuery, bot: Bot) -> None:
     await callback.answer("🎬 Video yuborilmoqda...")
     # Video hech qachon to'g'ridan-to'g'ri fayl/link sifatida berilmaydi —
     # faqat storage kanaldan bevosita o'quvchiga copy_message orqali yuboriladi.
+    # protect_content=True — video boshqa chatga forward qilinmaydi va
+    # galereyaga/qurilmaga saqlab bo'lmaydi (Telegramning o'z himoyasi).
     await bot.copy_message(
         chat_id=callback.from_user.id,
         from_chat_id=lesson.video_chat_id,
         message_id=lesson.video_message_id,
+        protect_content=True,
     )
 
     if lesson.id in completed_ids:
