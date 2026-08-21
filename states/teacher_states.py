@@ -35,3 +35,14 @@ class EditModule(StatesGroup):
 class EditLesson(StatesGroup):
     waiting_title = State()
     waiting_video = State()
+
+
+class RequestWithdrawal(StatesGroup):
+    """O'qituvchi pul yechish so'rovi: summa → karta raqami."""
+    waiting_amount = State()
+    waiting_card = State()
+
+
+class RejectWithdrawal(StatesGroup):
+    """Admin pul yechish so'rovini rad etayotganda sabab yozadi."""
+    waiting_reason = State()

@@ -5,7 +5,7 @@ summasi, status belgilari va ajratuvchi chiziqlar hamma joyda bir xil
 ko'rinadi.
 """
 
-from database.models import CourseStatus, PaymentStatus
+from database.models import CourseStatus, PaymentStatus, WithdrawalStatus
 
 DIVIDER = "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"
 
@@ -20,6 +20,12 @@ PAYMENT_STATUS_LABEL = {
     PaymentStatus.PENDING: "🟡 Kutilmoqda",
     PaymentStatus.PAID: "✅ To'langan",
     PaymentStatus.FAILED: "❌ Bekor qilingan",
+}
+
+WITHDRAWAL_STATUS_LABEL = {
+    WithdrawalStatus.PENDING: "🟡 Kutilmoqda",
+    WithdrawalStatus.APPROVED: "✅ Tasdiqlangan",
+    WithdrawalStatus.REJECTED: "❌ Rad etilgan",
 }
 
 

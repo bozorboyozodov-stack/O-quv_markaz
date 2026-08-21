@@ -3,14 +3,19 @@ import asyncio
 from aiogram import Router, F, Bot
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
-from sqlalchemy import select
+from sqlalchemy import select, func
 
 import config
 from database.db import async_session
-from database.models import User, RoleEnum, Course, CourseStatus, Module, Lesson, Payment, PaymentStatus
-from states.teacher_states import CreateCourse, AddLesson, EditModule, EditLesson
+from database.models import (
+    User, RoleEnum, Course, CourseStatus, Module, Lesson, Payment, PaymentStatus,
+    Withdrawal, WithdrawalStatus, Enrollment,
+)
+from states.teacher_states import CreateCourse, AddLesson, EditModule, EditLesson, RequestWithdrawal
 from utils.ordering import move_item
-from utils.format import fmt_money, DIVIDER, COURSE_STATUS_LABEL
+from utils.format import fmt_money, DIVIDER, COURSE_STATUS_LABEL, WITHDRAWAL_STATUS_LABEL
+from utils.withdrawals import get_teacher_balance
+from utils.roles import get_owner_telegram_id
 
 router = Router()
 
@@ -138,32 +143,288 @@ async def teacher_income(message: Message) -> None:
             select(Payment).where(Payment.teacher_id == user.id, Payment.status == PaymentStatus.PAID)
         )
         payments = result.scalars().all()
+        balance = await get_teacher_balance(session, user.id)
 
     total_sales = sum(p.amount for p in payments)
-    teacher_share = round(total_sales * 0.5)
 
     text = (
         f"💰 <b>Daromadim</b>\n"
         f"{DIVIDER}\n"
         f"🧾 Sotilgan kurslar: {len(payments)} ta\n"
         f"💵 Jami savdo: {fmt_money(total_sales)}\n"
-        f"👨‍🏫 Sizning ulushingiz (50%): <b>{fmt_money(teacher_share)}</b>\n"
+        f"👨‍🏫 Sizning ulushingiz (50%): <b>{fmt_money(balance['total_earned'])}</b>\n"
         f"{DIVIDER}\n"
-        f"ℹ️ 'Yechib olingan' va 'Balans' — pul yechish oqimi ulangach shu yerda ko'rinadi."
+        f"💳 Yechib olingan: {fmt_money(balance['approved_total'])}\n"
+        f"💰 Balans (yechib olish mumkin): <b>{fmt_money(balance['available'])}</b>\n"
+        f"{DIVIDER}\n"
+        f"👉 '💳 Pul yechish' bo'limidan so'rov yuborishingiz mumkin."
     )
     await message.answer(text)
 
 
-@router.message(F.text.in_({"👨‍🎓 O'quvchilarim", "📊 Statistika", "💳 Pul yechish"}))
-async def teacher_stub(message: Message) -> None:
+@router.message(F.text == "👨‍🎓 O'quvchilarim")
+async def teacher_students(message: Message) -> None:
     user = await _require_teacher(message)
     if not user:
         return
+
+    async with async_session() as session:
+        result = await session.execute(select(Course).where(Course.teacher_id == user.id))
+        courses = result.scalars().all()
+
+        if not courses:
+            await message.answer("📭 Sizda hali kurslar yo'q, shuning uchun o'quvchilar ham yo'q.")
+            return
+
+        course_ids = [c.id for c in courses]
+        result = await session.execute(
+            select(func.count()).select_from(Enrollment).where(Enrollment.course_id.in_(course_ids))
+        )
+        total_students = result.scalar_one()
+
+        lines = [f"👨‍🎓 <b>O'quvchilarim</b> ({total_students} ta)", DIVIDER]
+        rows = []
+        for c in courses:
+            result = await session.execute(
+                select(func.count()).select_from(Enrollment).where(Enrollment.course_id == c.id)
+            )
+            count = result.scalar_one()
+            lines.append(f"🎓 <b>{c.title}</b> — {count} ta o'quvchi")
+            if count:
+                rows.append([InlineKeyboardButton(
+                    text=f"👥 {c.title} — ko'rish", callback_data=f"tstudents:{c.id}",
+                )])
+
     await message.answer(
-        "🚧 Bu bo'lim tez orada ishga tushadi.\n\n"
-        "Hozircha kerakli ma'lumotlar (to'lovlar, o'quvchilar) bazada allaqachon yig'ilmoqda — "
-        "faqat shu ekran ulanishi kerak."
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows) if rows else None,
     )
+
+
+@router.callback_query(F.data.startswith("tstudents:"))
+async def teacher_students_list(callback: CallbackQuery) -> None:
+    course_id = int(callback.data.split(":")[1])
+
+    async with async_session() as session:
+        result = await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
+        teacher = result.scalar_one_or_none()
+        course = await session.get(Course, course_id)
+        if not teacher or not course or course.teacher_id != teacher.id:
+            await callback.answer("Ruxsat yo'q", show_alert=True)
+            return
+
+        result = await session.execute(
+            select(Enrollment, User)
+            .join(User, Enrollment.student_id == User.id)
+            .where(Enrollment.course_id == course_id)
+            .order_by(Enrollment.created_at.desc())
+        )
+        rows = result.all()
+
+    if not rows:
+        await callback.answer("Hali o'quvchi yo'q", show_alert=True)
+        return
+
+    lines = [f"👥 <b>{course.title}</b> — o'quvchilar ({len(rows)} ta)", DIVIDER]
+    for enrollment, student in rows[:50]:
+        lines.append(
+            f"👤 {student.full_name or '—'} (@{student.username or '—'})\n"
+            f"🆔 <code>{student.telegram_id}</code> · 📊 Progress: {enrollment.progress_percent}%"
+        )
+    if len(rows) > 50:
+        lines.append(f"\n… va yana {len(rows) - 50} ta o'quvchi.")
+
+    await callback.message.answer("\n\n".join(lines))
+    await callback.answer()
+
+
+@router.message(F.text == "📊 Statistika")
+async def teacher_statistics(message: Message) -> None:
+    user = await _require_teacher(message)
+    if not user:
+        return
+
+    async with async_session() as session:
+        result = await session.execute(select(Course).where(Course.teacher_id == user.id))
+        courses = result.scalars().all()
+        course_ids = [c.id for c in courses]
+
+        approved = sum(1 for c in courses if c.status == CourseStatus.APPROVED)
+        pending = sum(1 for c in courses if c.status == CourseStatus.PENDING)
+        hidden = sum(1 for c in courses if c.status == CourseStatus.HIDDEN)
+        rejected = sum(1 for c in courses if c.status == CourseStatus.REJECTED)
+
+        lesson_count = 0
+        total_students = 0
+        if course_ids:
+            result = await session.execute(
+                select(func.count()).select_from(Lesson).join(Module).where(Module.course_id.in_(course_ids))
+            )
+            lesson_count = result.scalar_one()
+
+            result = await session.execute(
+                select(func.count(func.distinct(Enrollment.student_id))).where(
+                    Enrollment.course_id.in_(course_ids)
+                )
+            )
+            total_students = result.scalar_one()
+
+        result = await session.execute(
+            select(Payment).where(Payment.teacher_id == user.id, Payment.status == PaymentStatus.PAID)
+        )
+        payments = result.scalars().all()
+        balance = await get_teacher_balance(session, user.id)
+
+        # Eng ko'p sotilgan kurs
+        sales_by_course: dict[int, int] = {}
+        for p in payments:
+            sales_by_course[p.course_id] = sales_by_course.get(p.course_id, 0) + 1
+        top_course = None
+        if sales_by_course:
+            top_course_id = max(sales_by_course, key=sales_by_course.get)
+            top_course = next((c for c in courses if c.id == top_course_id), None)
+
+    total_sales = sum(p.amount for p in payments)
+
+    lines = [
+        "📊 <b>Statistika</b>",
+        DIVIDER,
+        f"📚 Kurslar: {len(courses)} ta",
+        f"　✅ Faol: {approved} · 🟡 Moderatsiyada: {pending} · 🙈 Yashirin: {hidden} · ❌ Rad etilgan: {rejected}",
+        f"🎥 Jami darslar: {lesson_count} ta",
+        f"👨‍🎓 Jami o'quvchilar: {total_students} ta",
+        DIVIDER,
+        f"🧾 Sotuvlar: {len(payments)} ta",
+        f"💵 Jami savdo: {fmt_money(total_sales)}",
+        f"👨‍🏫 Ulushingiz (50%): {fmt_money(balance['total_earned'])}",
+        f"💰 Mavjud balans: {fmt_money(balance['available'])}",
+    ]
+    if top_course:
+        lines += [DIVIDER, f"🏆 Eng ko'p sotilgan kurs: {top_course.title} ({sales_by_course[top_course.id]} ta)"]
+
+    await message.answer("\n".join(lines))
+
+
+# ============================================================
+# 💳 Pul yechish — o'qituvchi balansidan yechib olish so'rovi
+#
+# Oqim: balans tekshiriladi → summa so'raladi (balansdan oshmasligi kerak)
+# → karta raqami so'raladi → Withdrawal(PENDING) yaratiladi → admin (OWNER_ID)
+# ga xabar boradi, tugmalar bilan: ✅ Tasdiqlash / ❌ Rad etish.
+# ============================================================
+@router.message(F.text == "💳 Pul yechish")
+async def start_withdrawal(message: Message, state: FSMContext) -> None:
+    user = await _require_teacher(message)
+    if not user:
+        return
+
+    async with async_session() as session:
+        balance = await get_teacher_balance(session, user.id)
+
+    if balance["available"] <= 0:
+        await message.answer(
+            "📭 Hozircha yechib olish uchun mavjud balansingiz yo'q.\n\n"
+            f"💰 Balans: <b>{fmt_money(balance['available'])}</b>"
+        )
+        return
+
+    await state.set_state(RequestWithdrawal.waiting_amount)
+    await state.update_data(available=balance["available"])
+    await message.answer(
+        f"💳 <b>Pul yechish</b>\n"
+        f"{DIVIDER}\n"
+        f"💰 Mavjud balans: <b>{fmt_money(balance['available'])}</b>\n"
+        f"{DIVIDER}\n"
+        "Yechib olmoqchi bo'lgan summani so'mda kiriting (faqat raqam, masalan: 500000):"
+    )
+
+
+@router.message(RequestWithdrawal.waiting_amount)
+async def withdrawal_amount(message: Message, state: FSMContext) -> None:
+    text = (message.text or "").strip().replace(" ", "")
+    if not text.isdigit() or int(text) <= 0:
+        await message.answer("⚠️ Iltimos faqat musbat raqam kiriting. Masalan: 500000")
+        return
+
+    amount = int(text)
+    data = await state.get_data()
+    available = data.get("available", 0)
+
+    if amount > available:
+        await message.answer(
+            f"⚠️ Bu summa balansingizdan katta.\n\n"
+            f"💰 Mavjud balans: <b>{fmt_money(available)}</b>\n\n"
+            "Iltimos, balansdan oshmaydigan summa kiriting:"
+        )
+        return
+
+    await state.update_data(amount=amount)
+    await state.set_state(RequestWithdrawal.waiting_card)
+    await message.answer("💳 Endi karta raqamingizni kiriting (masalan: 8600 1234 5678 9012):")
+
+
+@router.message(RequestWithdrawal.waiting_card)
+async def withdrawal_card(message: Message, state: FSMContext) -> None:
+    card_number = (message.text or "").strip()
+    if len(card_number) < 8:
+        await message.answer("⚠️ Iltimos to'g'ri karta raqamini kiriting.")
+        return
+
+    data = await state.get_data()
+    amount = data.get("amount")
+    await state.clear()
+
+    async with async_session() as session:
+        result = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
+        user = result.scalar_one_or_none()
+        if not user:
+            await message.answer("Xatolik yuz berdi. Iltimos /start bosing.")
+            return
+        # Balansni yana bir bor tekshiramiz (race condition'dan himoya)
+        balance = await get_teacher_balance(session, user.id)
+        if amount > balance["available"]:
+            await message.answer(
+                "⚠️ Balansingiz o'zgardi va bu summa endi mavjud emas.\n\n"
+                f"💰 Joriy balans: <b>{fmt_money(balance['available'])}</b>\n\n"
+                "Iltimos, '💳 Pul yechish' bo'limidan qaytadan urinib ko'ring."
+            )
+            return
+
+        withdrawal = Withdrawal(teacher_id=user.id, amount=amount, card_number=card_number)
+        session.add(withdrawal)
+        await session.commit()
+        await session.refresh(withdrawal)
+
+        owner_id = await get_owner_telegram_id()
+        teacher_name = user.full_name or "—"
+        teacher_username = f"@{user.username}" if user.username else "—"
+
+    await message.answer(
+        f"✅ So'rovingiz qabul qilindi.\n\n"
+        f"💰 Summa: <b>{fmt_money(amount)}</b>\n"
+        f"💳 Karta: <code>{card_number}</code>\n\n"
+        "Admin tekshirib chiqqach, sizga xabar beriladi ⏳"
+    )
+
+    caption = (
+        f"💳 <b>Yangi pul yechish so'rovi</b>\n"
+        f"{DIVIDER}\n"
+        f"👨‍🏫 O'qituvchi: {teacher_name} ({teacher_username})\n"
+        f"🆔 Telegram ID: <code>{user.telegram_id}</code>\n\n"
+        f"{teacher_name} ({teacher_username}) <b>{fmt_money(amount)}</b> pul yechib olmoqchi.\n\n"
+        f"💳 Karta raqami: <code>{card_number}</code>\n"
+        f"{DIVIDER}\n"
+        f"🔢 So'rov ID: {withdrawal.id}"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Tasdiqlash", callback_data=f"wd_ok:{withdrawal.id}"),
+        InlineKeyboardButton(text="❌ Rad etish", callback_data=f"wd_no:{withdrawal.id}"),
+    ]])
+    if owner_id:
+        try:
+            await message.bot.send_message(owner_id, caption, reply_markup=kb)
+        except Exception:
+            pass
 
 
 # ============================================================

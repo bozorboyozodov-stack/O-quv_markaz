@@ -5,9 +5,11 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from sqlalchemy import select, func
 
 from database.db import async_session
-from database.models import User, RoleEnum, Course, CourseStatus, Payment, PaymentStatus, PaymentCard
-from states.teacher_states import PromoteTeacher, AddCard
+from database.models import User, RoleEnum, Course, CourseStatus, Payment, PaymentStatus, PaymentCard, Withdrawal, WithdrawalStatus, Enrollment
+from states.teacher_states import PromoteTeacher, AddCard, RejectWithdrawal
 from utils.payments import approve_payment, reject_payment, notify_student_approved, notify_student_rejected
+from utils.withdrawals import approve_withdrawal, reject_withdrawal, notify_teacher_withdrawal_approved, notify_teacher_withdrawal_rejected, get_admin_balance
+from utils.income import get_income_summary
 from utils.format import fmt_money, fmt_date, DIVIDER
 from config import ADMIN_IDS
 
@@ -97,6 +99,52 @@ async def dashboard(message: Message) -> None:
         f"{DIVIDER}\n"
         f"💰 Jami tasdiqlangan to'lovlar: <b>{fmt_money(paid_sum)}</b>\n"
         f"🧾 Tekshirish kutilayotgan cheklar: {pending_receipts}"
+    )
+    await message.answer(text)
+
+
+@router.message(F.text == "💰 Daromad")
+async def income_overview(message: Message) -> None:
+    if not await _require_admin(message):
+        return
+
+    async with async_session() as session:
+        income = await get_income_summary(session)
+
+    text = (
+        "💰 <b>Daromad</b>\n"
+        f"{DIVIDER}\n"
+        f"📅 Bugun: <b>{fmt_money(income['today'])}</b>\n"
+        f"🗓 Shu hafta: <b>{fmt_money(income['week'])}</b>\n"
+        f"📆 Shu oy: <b>{fmt_money(income['month'])}</b>\n"
+        f"{DIVIDER}\n"
+        f"🏦 Umumiy (barcha vaqt): <b>{fmt_money(income['all_time'])}</b>\n\n"
+        "<i>Bu — barcha tasdiqlangan to'lovlarning yalpi summasi "
+        "(o'qituvchilar ulushi + admin ulushi qo'shilgan holda).</i>"
+    )
+    await message.answer(text)
+
+
+@router.message(F.text == "💳 Balans")
+async def admin_balance_overview(message: Message) -> None:
+    if not await _require_admin(message):
+        return
+
+    async with async_session() as session:
+        balance = await get_admin_balance(session)
+
+    text = (
+        "💳 <b>Balans</b>\n"
+        f"{DIVIDER}\n"
+        f"💰 Jami tushgan pul: <b>{fmt_money(balance['total_paid'])}</b>\n"
+        f"👨‍🏫 O'qituvchilar ulushi (jami): {fmt_money(balance['teacher_share_total'])}\n"
+        f"✅ O'qituvchilarga to'langan: {fmt_money(balance['withdrawn_to_teachers'])}\n"
+        f"{DIVIDER}\n"
+        f"💵 Sizning sof ulushingiz: <b>{fmt_money(balance['admin_share'])}</b>\n"
+        f"🏦 Hozir hisobingizda turgan pul: <b>{fmt_money(balance['cash_on_hand'])}</b>\n\n"
+        "<i>Hozir hisobingizda turgan pul = jami tushgan pul − o'qituvchilarga "
+        "allaqachon to'langan pul. Bu summaga o'qituvchilarning hali yechilmagan "
+        "ulushi ham kiradi — ular yechib olishganda bu son kamayadi.</i>"
     )
     await message.answer(text)
 
@@ -194,20 +242,89 @@ async def finish_promote(message: Message, state: FSMContext) -> None:
 
 
 @router.message(F.text == "👨‍🎓 O'quvchilar")
-async def list_students_stub(message: Message) -> None:
+async def list_students(message: Message) -> None:
     if not await _require_admin(message):
         return
     async with async_session() as session:
         result = await session.execute(select(User).where(User.role == RoleEnum.STUDENT))
         students = result.scalars().all()
 
-    if not students:
-        await message.answer("📭 Hali o'quvchilar yo'q.")
-        return
+        if not students:
+            await message.answer("📭 Hali o'quvchilar yo'q.")
+            return
+
+        student_ids = [s.id for s in students]
+        result = await session.execute(
+            select(Enrollment.student_id, func.count()).where(
+                Enrollment.student_id.in_(student_ids)
+            ).group_by(Enrollment.student_id)
+        )
+        course_counts = dict(result.all())
 
     lines = [f"👨‍🎓 <b>O'quvchilar</b> ({len(students)} ta, birinchi 30 tasi)", DIVIDER]
-    lines += [f"{s.full_name or '—'} (@{s.username or '—'}) — <code>{s.telegram_id}</code>" for s in students[:30]]
+    rows = []
+    for s in students[:30]:
+        count = course_counts.get(s.id, 0)
+        lines.append(
+            f"{s.full_name or '—'} (@{s.username or '—'}) — <code>{s.telegram_id}</code>\n"
+            f"📚 Sotib olgan kurslari: {count} ta"
+        )
+        rows.append([InlineKeyboardButton(
+            text=f"🔍 {s.full_name or s.telegram_id} — kurslarini ko'rish",
+            callback_data=f"astudent:{s.id}",
+        )])
+
     await message.answer("\n".join(lines))
+    if rows:
+        await message.answer(
+            "Batafsil ko'rish uchun tugmani bosing 👇",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+        )
+
+
+@router.callback_query(F.data.startswith("astudent:"))
+async def student_courses_detail(callback: CallbackQuery) -> None:
+    if not await _require_admin_user(callback):
+        return
+
+    student_id = int(callback.data.split(":")[1])
+    async with async_session() as session:
+        student = await session.get(User, student_id)
+        if not student:
+            await callback.answer("O'quvchi topilmadi", show_alert=True)
+            return
+
+        result = await session.execute(
+            select(Enrollment, Course)
+            .join(Course, Enrollment.course_id == Course.id)
+            .where(Enrollment.student_id == student_id)
+            .order_by(Enrollment.created_at.desc())
+        )
+        rows = result.all()
+
+    if not rows:
+        await callback.message.answer(
+            f"👤 <b>{student.full_name or '—'}</b> (@{student.username or '—'})\n\n"
+            "📭 Hali birorta kurs sotib olmagan."
+        )
+        await callback.answer()
+        return
+
+    lines = [
+        f"👤 <b>{student.full_name or '—'}</b> (@{student.username or '—'})\n"
+        f"🆔 <code>{student.telegram_id}</code>\n"
+        f"📚 Sotib olgan kurslari: {len(rows)} ta",
+        DIVIDER,
+    ]
+    for enrollment, course in rows:
+        lines.append(
+            f"🎓 <b>{course.title}</b>\n"
+            f"💰 {fmt_money(course.price)} · 📊 Progress: {enrollment.progress_percent}%\n"
+            f"📅 Sotib olgan sana: {fmt_date(enrollment.created_at)}"
+        )
+
+    await callback.message.answer("\n\n".join(lines))
+    await callback.answer()
 
 
 # ------------------------------------------------------------------
@@ -398,3 +515,102 @@ async def cancel_payment(callback: CallbackQuery) -> None:
     except Exception:
         await callback.message.edit_text(caption)
     await callback.answer("Bekor qilindi, o'quvchiga xabar yuborildi")
+
+
+# ------------------------------------------------------------------
+# 💳 Pul yechish so'rovlarini tasdiqlash / rad etish
+# ------------------------------------------------------------------
+@router.callback_query(F.data.startswith("wd_ok:"))
+async def confirm_withdrawal(callback: CallbackQuery) -> None:
+    admin = await _require_admin_user(callback)
+    if not admin:
+        return
+
+    withdrawal_id = int(callback.data.split(":")[1])
+    async with async_session() as session:
+        withdrawal = await session.get(Withdrawal, withdrawal_id)
+        if not withdrawal:
+            await callback.answer("So'rov topilmadi", show_alert=True)
+            return
+        if withdrawal.status != WithdrawalStatus.PENDING:
+            await callback.answer("Bu so'rov allaqachon ko'rib chiqilgan.", show_alert=True)
+            return
+
+        await approve_withdrawal(session, withdrawal, admin)
+        await notify_teacher_withdrawal_approved(callback.bot, session, withdrawal)
+
+    old_text = callback.message.text or callback.message.caption or ""
+    new_text = old_text + "\n\n✅ TASDIQLANDI"
+    try:
+        await callback.message.edit_text(new_text)
+    except Exception:
+        await callback.message.edit_caption(caption=new_text)
+    await callback.answer("Tasdiqlandi, o'qituvchiga xabar yuborildi ✅")
+
+
+@router.callback_query(F.data.startswith("wd_no:"))
+async def start_reject_withdrawal(callback: CallbackQuery, state: FSMContext) -> None:
+    admin = await _require_admin_user(callback)
+    if not admin:
+        return
+
+    withdrawal_id = int(callback.data.split(":")[1])
+    async with async_session() as session:
+        withdrawal = await session.get(Withdrawal, withdrawal_id)
+        if not withdrawal:
+            await callback.answer("So'rov topilmadi", show_alert=True)
+            return
+        if withdrawal.status != WithdrawalStatus.PENDING:
+            await callback.answer("Bu so'rov allaqachon ko'rib chiqilgan.", show_alert=True)
+            return
+
+    await state.set_state(RejectWithdrawal.waiting_reason)
+    await state.update_data(withdrawal_id=withdrawal_id, chat_id=callback.message.chat.id,
+                             message_id=callback.message.message_id)
+    await callback.message.answer(
+        f"❌ <b>Rad etish sababi</b>\n\n"
+        f"🔢 So'rov ID: {withdrawal_id}\n\n"
+        "Sababini yozib yuboring — bu matn o'qituvchiga aynan shu ko'rinishda ko'rsatiladi:"
+    )
+    await callback.answer()
+
+
+@router.message(RejectWithdrawal.waiting_reason)
+async def finish_reject_withdrawal(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    await state.clear()
+
+    withdrawal_id = data.get("withdrawal_id")
+    reason = (message.text or "").strip()
+    if not reason:
+        await message.answer("⚠️ Iltimos sababni matn ko'rinishida yuboring.")
+        await state.set_state(RejectWithdrawal.waiting_reason)
+        await state.update_data(**data)
+        return
+
+    async with async_session() as session:
+        result = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
+        admin = result.scalar_one_or_none()
+        withdrawal = await session.get(Withdrawal, withdrawal_id) if withdrawal_id else None
+        if not withdrawal or not admin:
+            await message.answer("So'rov topilmadi yoki allaqachon ko'rib chiqilgan.")
+            return
+        if withdrawal.status != WithdrawalStatus.PENDING:
+            await message.answer("Bu so'rov allaqachon ko'rib chiqilgan.")
+            return
+
+        await reject_withdrawal(session, withdrawal, admin, reason)
+        await notify_teacher_withdrawal_rejected(message.bot, session, withdrawal)
+
+    chat_id = data.get("chat_id")
+    message_id = data.get("message_id")
+    if chat_id and message_id:
+        try:
+            await message.bot.edit_message_text(
+                chat_id=chat_id, message_id=message_id,
+                text=f"💳 So'rov #{withdrawal_id}\n\n❌ RAD ETILDI\nSababi: {reason}",
+            )
+        except Exception:
+            pass
+
+    await message.answer(f"✅ Rad etildi va o'qituvchiga sabab bilan xabar yuborildi.\n\nSababi: {reason}")

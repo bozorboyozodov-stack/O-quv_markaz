@@ -31,6 +31,12 @@ class PaymentStatus(str, enum.Enum):
     FAILED = "FAILED"
 
 
+class WithdrawalStatus(str, enum.Enum):
+    PENDING = "PENDING"      # Admin javobini kutmoqda
+    APPROVED = "APPROVED"    # Admin tasdiqladi
+    REJECTED = "REJECTED"    # Admin rad etdi (sababi bilan)
+
+
 # ------------------------------------------------------------------
 # users — hujjatdagi 15-bo'lim: users, teachers, students bitta jadvalga
 # role maydoni orqali birlashtirilgan (soddalashtirish uchun; keyinchalik
@@ -179,6 +185,32 @@ class LessonProgress(Base):
     lesson_id: Mapped[int] = mapped_column(ForeignKey("lessons.id"))
     is_completed: Mapped[bool] = mapped_column(default=False)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class Withdrawal(Base):
+    """Hujjatning 10-bo'limi: 'Pul yechish tizimi'.
+
+    O'qituvchi balansidan (50% ulushidan) pul yechib olish so'rovi.
+    Oqim:
+    PENDING (admin javobini kutmoqda) → APPROVED (admin tasdiqladi, o'qituvchiga
+    xabar boradi) yoki REJECTED (admin sababi bilan rad etadi, o'qituvchiga
+    sabab bilan xabar boradi).
+
+    Balans hisobi: teacher_share (barcha PAID to'lovlarning 50% ulushi) minus
+    hali ko'rib chiqilmagan (PENDING) va allaqachon tasdiqlangan (APPROVED)
+    so'rovlar yig'indisi — shu orqali o'qituvchi balansidan ko'p pul so'ray
+    olmaydi, hatto bir nechta so'rovni ketma-ket yuborsa ham."""
+    __tablename__ = "withdrawals"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    teacher_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    amount: Mapped[int] = mapped_column(Integer)  # so'mda
+    card_number: Mapped[str] = mapped_column(String(64), default="")
+    status: Mapped[WithdrawalStatus] = mapped_column(SAEnum(WithdrawalStatus), default=WithdrawalStatus.PENDING)
+    reject_reason: Mapped[str] = mapped_column(Text, default="")
+    reviewed_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class Certificate(Base):
