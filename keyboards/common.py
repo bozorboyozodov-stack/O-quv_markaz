@@ -36,6 +36,7 @@ def admin_main_menu() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="📊 Dashboard"), KeyboardButton(text="🟡 Moderatsiyadagi kurslar")],
+            [KeyboardButton(text="🆕 Yangi kurslar")],
             [KeyboardButton(text="💰 Daromad"), KeyboardButton(text="💳 Balans")],
             [KeyboardButton(text="➕ Kurs yaratish"), KeyboardButton(text="🎥 Dars qo'shish")],
             [KeyboardButton(text="👨‍🏫 O'qituvchilar"), KeyboardButton(text="👨‍🎓 O'quvchilar")],

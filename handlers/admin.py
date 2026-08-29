@@ -12,9 +12,9 @@ from utils.payments import (
     notify_student_approved, notify_student_rejected,
     notify_admins_course_sold, notify_teacher_course_sold,
 )
-from utils.withdrawals import approve_withdrawal, reject_withdrawal, notify_teacher_withdrawal_approved, notify_teacher_withdrawal_rejected, get_admin_balance
+from utils.withdrawals import approve_withdrawal, reject_withdrawal, notify_teacher_withdrawal_approved, notify_teacher_withdrawal_rejected, get_admin_balance, get_teacher_balance
 from utils.income import get_income_summary
-from utils.format import fmt_money, fmt_date, DIVIDER
+from utils.format import fmt_money, fmt_date, DIVIDER, COURSE_STATUS_LABEL
 from utils.settings import get_setting, set_setting, resolve_contact_url, SUPPORT_CONTACT_KEY
 import config
 from config import ADMIN_IDS
@@ -168,16 +168,27 @@ async def pending_courses(message: Message) -> None:
         return
 
     async with async_session() as session:
-        result = await session.execute(select(Course).where(Course.status == CourseStatus.PENDING))
-        courses = result.scalars().all()
+        result = await session.execute(
+            select(Course, User)
+            .join(User, Course.teacher_id == User.id)
+            .where(Course.status == CourseStatus.PENDING)
+            .order_by(Course.created_at.desc())
+        )
+        rows = result.all()
 
-    if not courses:
+    if not rows:
         await message.answer("✅ Moderatsiyada kurs yo'q.")
         return
 
-    await message.answer(f"🟡 <b>Moderatsiyadagi kurslar</b> ({len(courses)} ta):")
-    for c in courses:
-        text = f"🎓 <b>{c.title}</b>\n{fmt_money(c.price)} · 📂 {c.category or '—'}"
+    await message.answer(f"🟡 <b>Moderatsiyadagi kurslar</b> ({len(rows)} ta):")
+    for c, teacher in rows:
+        subject_label = f"{teacher.subject} o'qituvchisi" if teacher.subject else "fani kiritilmagan"
+        teacher_name = teacher.full_name or teacher.username or str(teacher.telegram_id)
+        text = (
+            f"🎓 <b>{c.title}</b>\n"
+            f"👨‍🏫 {teacher_name} ({subject_label})\n"
+            f"{fmt_money(c.price)} · 📂 {c.category or '—'}"
+        )
         await message.answer(text, reply_markup=_moderation_kb(c.id))
 
 
@@ -215,6 +226,43 @@ async def reject_course(callback: CallbackQuery) -> None:
     await callback.answer("Kurs rad etildi")
 
 
+# ------------------------------------------------------------------
+# 🆕 Yangi kurslar — barcha kurslar, qaysi o'qituvchi qo'shganini
+# (fani bilan birga) ko'rsatadigan ro'yxat. Admin shu orqali qaysi
+# o'qituvchi qaysi kursni qo'shganini ko'ra oladi.
+# ------------------------------------------------------------------
+@router.message(F.text == "🆕 Yangi kurslar")
+async def all_courses_with_teacher(message: Message) -> None:
+    if not await _require_admin(message):
+        return
+
+    async with async_session() as session:
+        result = await session.execute(
+            select(Course, User)
+            .join(User, Course.teacher_id == User.id)
+            .order_by(Course.created_at.desc())
+        )
+        rows = result.all()
+
+    if not rows:
+        await message.answer("📭 Hali birorta kurs qo'shilmagan.")
+        return
+
+    await message.answer(f"🆕 <b>Barcha kurslar</b> ({len(rows)} ta):")
+    for course, teacher in rows:
+        subject_label = f"{teacher.subject} o'qituvchisi" if teacher.subject else "fani kiritilmagan"
+        teacher_name = teacher.full_name or teacher.username or str(teacher.telegram_id)
+        status_label = COURSE_STATUS_LABEL.get(course.status, course.status)
+        text = (
+            f"🎓 <b>{course.title}</b>\n"
+            f"👨‍🏫 {teacher_name} ({subject_label})\n"
+            f"💰 {fmt_money(course.price)} · 📂 {course.category or '—'}\n"
+            f"📌 Holati: {status_label}\n"
+            f"🗓 {fmt_date(course.created_at)}"
+        )
+        await message.answer(text)
+
+
 async def _resolve_user_by_username(session, raw: str) -> User | None:
     username = (raw or "").strip().lstrip("@")
     if not username:
@@ -244,13 +292,33 @@ async def list_teachers(message: Message) -> None:
         )
         teachers = result.scalars().all()
 
+        course_counts: dict[int, int] = {}
+        if teachers:
+            count_result = await session.execute(
+                select(Course.teacher_id, func.count())
+                .where(Course.teacher_id.in_([t.id for t in teachers]))
+                .group_by(Course.teacher_id)
+            )
+            course_counts = dict(count_result.all())
+
+        balances: dict[int, int] = {}
+        for t in teachers:
+            balance = await get_teacher_balance(session, t.id)
+            balances[t.id] = balance["available"]
+
     if not teachers:
         await message.answer("📭 Hali o'qituvchilar yo'q.")
     else:
         await message.answer(f"👨‍🏫 <b>O'qituvchilar</b> ({len(teachers)} ta):")
-        for t in teachers:
-            subject_line = f"\n📚 Fan: <b>{t.subject}</b>" if t.subject else "\n📚 Fan: — (kiritilmagan)"
-            text = f"{t.full_name or '—'} (@{t.username or '—'}){subject_line}\n🆔 <code>{t.telegram_id}</code>"
+        for i, t in enumerate(teachers, start=1):
+            subject_label = f"{t.subject} o'qituvchisi" if t.subject else "fani kiritilmagan"
+            course_count = course_counts.get(t.id, 0)
+            balance = balances.get(t.id, 0)
+            text = (
+                f"{i}) <b>{t.full_name or '—'}</b> ({subject_label})\n"
+                f"(balansi: {fmt_money(balance)}) (yuklagan kurslari: {course_count} ta)\n"
+                f"👤 @{t.username or '—'} · 🆔 <code>{t.telegram_id}</code>"
+            )
             await message.answer(text, reply_markup=_teacher_manage_kb(t.id))
 
     await message.answer(
