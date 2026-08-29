@@ -42,6 +42,13 @@ class EditModule(StatesGroup):
     waiting_title = State()
 
 
+class EditCourse(StatesGroup):
+    """O'qituvchi (yoki admin) kursning o'zini (nomi/tavsifi/narxi/kategoriyasi)
+    tahrirlamoqchi bo'lganda. `field` FSM data'da saqlanadi — qaysi maydon
+    tahrirlanayotganini bilish uchun."""
+    waiting_value = State()
+
+
 class EditLesson(StatesGroup):
     waiting_title = State()
     waiting_video = State()

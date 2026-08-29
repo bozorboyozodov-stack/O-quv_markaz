@@ -11,7 +11,7 @@ from database.models import (
     User, RoleEnum, Course, CourseStatus, Module, Lesson, Payment, PaymentStatus,
     Withdrawal, WithdrawalStatus, Enrollment,
 )
-from states.teacher_states import CreateCourse, AddLesson, EditModule, EditLesson, RequestWithdrawal
+from states.teacher_states import CreateCourse, AddLesson, EditModule, EditLesson, RequestWithdrawal, EditCourse
 from utils.ordering import move_item
 from utils.format import fmt_money, DIVIDER, COURSE_STATUS_LABEL, WITHDRAWAL_STATUS_LABEL
 from utils.withdrawals import get_teacher_balance
@@ -688,15 +688,188 @@ async def _render_course_management(callback: CallbackQuery, course_id: int) -> 
             row.append(InlineKeyboardButton(text="⬇️", callback_data=f"tmod_down:{m.id}"))
         rows.append(row)
     rows.append([InlineKeyboardButton(text="➕ Yangi modul", callback_data=f"lm_new:{course_id}")])
+    rows.append([
+        InlineKeyboardButton(text="✏️ Kursni tahrirlash", callback_data=f"tcourse_edit:{course_id}"),
+        InlineKeyboardButton(text="🗑 Kursni o'chirish", callback_data=f"tcourse_del:{course_id}"),
+    ])
 
     await callback.message.edit_text(
         f"📂 <b>{course.title}</b>\n"
+        f"{fmt_money(course.price)} · {COURSE_STATUS_LABEL[course.status]} · 📂 {course.category or '—'}\n"
         f"{DIVIDER}\n"
         "Modulni tanlang (tahrirlash/darslarni ko'rish uchun).\n"
         "⬆️/⬇️ — modullar tartibini o'zgartirish:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
     )
     await callback.answer()
+
+
+# ------------------------------------------------------------------
+# ✏️🗑 Kursning o'zini tahrirlash / o'chirish (nomi, tavsifi, narxi,
+# kategoriyasi — modul/darslardan farqli, butun kurs darajasida)
+# ------------------------------------------------------------------
+def _course_edit_kb(course_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📝 Nomi", callback_data=f"cedit_f:title:{course_id}"),
+         InlineKeyboardButton(text="🧾 Tavsifi", callback_data=f"cedit_f:description:{course_id}")],
+        [InlineKeyboardButton(text="💰 Narxi", callback_data=f"cedit_f:price:{course_id}"),
+         InlineKeyboardButton(text="📂 Kategoriyasi", callback_data=f"cedit_f:category:{course_id}")],
+        [InlineKeyboardButton(text="⬅️ Orqaga", callback_data=f"tcourse:{course_id}")],
+    ])
+
+
+@router.callback_query(F.data.startswith("tcourse_edit:"))
+async def start_edit_course(callback: CallbackQuery) -> None:
+    course_id = int(callback.data.split(":")[1])
+    async with async_session() as session:
+        course = await _check_course_owner(session, course_id, callback.from_user.id)
+        if not course:
+            await callback.answer("Ruxsat yo'q", show_alert=True)
+            return
+
+    await callback.message.edit_text(
+        f"✏️ <b>{course.title}</b>\n"
+        f"{DIVIDER}\n"
+        f"🧾 {course.description or '—'}\n"
+        f"💰 {fmt_money(course.price)} · 📂 {course.category or '—'}\n"
+        f"{DIVIDER}\n"
+        "Qaysi maydonni tahrirlaysiz?",
+        reply_markup=_course_edit_kb(course_id),
+    )
+    await callback.answer()
+
+
+_COURSE_FIELD_LABELS = {
+    "title": "nomi",
+    "description": "tavsifi",
+    "price": "narxi",
+    "category": "kategoriyasi",
+}
+
+
+@router.callback_query(F.data.startswith("cedit_f:"))
+async def choose_course_field(callback: CallbackQuery, state: FSMContext) -> None:
+    _, field, course_id_raw = callback.data.split(":")
+    course_id = int(course_id_raw)
+    async with async_session() as session:
+        course = await _check_course_owner(session, course_id, callback.from_user.id)
+        if not course:
+            await callback.answer("Ruxsat yo'q", show_alert=True)
+            return
+
+    await state.update_data(course_id=course_id, field=field)
+    await state.set_state(EditCourse.waiting_value)
+    label = _COURSE_FIELD_LABELS.get(field, field)
+    hint = "\n\n(faqat raqam kiriting, masalan: 299000)" if field == "price" else ""
+    await callback.message.edit_text(f"✏️ Kursning yangi <b>{label}</b>ni yuboring:{hint}")
+    await callback.answer()
+
+
+@router.message(EditCourse.waiting_value)
+async def save_course_field(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    course_id = data.get("course_id")
+    field = data.get("field")
+    value = (message.text or "").strip()
+
+    if field == "price":
+        if not value.isdigit():
+            await message.answer("⚠️ Iltimos faqat raqam kiriting. Masalan: 299000")
+            return
+        value = int(value)
+    elif not value:
+        await message.answer("⚠️ Bo'sh matn yuborib bo'lmaydi.")
+        return
+
+    async with async_session() as session:
+        course = await _check_course_owner(session, course_id, message.from_user.id)
+        if not course:
+            await message.answer("Ruxsat yo'q")
+            await state.clear()
+            return
+        setattr(course, field, value)
+        await session.commit()
+        title = course.title
+
+    await state.clear()
+    label = _COURSE_FIELD_LABELS.get(field, field)
+    await message.answer(f"✅ \"{title}\" kursining {label}i yangilandi.")
+
+
+@router.callback_query(F.data.startswith("tcourse_del:"))
+async def confirm_delete_course(callback: CallbackQuery) -> None:
+    course_id = int(callback.data.split(":")[1])
+    async with async_session() as session:
+        course = await _check_course_owner(session, course_id, callback.from_user.id)
+        if not course:
+            await callback.answer("Ruxsat yo'q", show_alert=True)
+            return
+        result = await session.execute(
+            select(func.count()).select_from(Enrollment).where(Enrollment.course_id == course_id)
+        )
+        enrolled_count = result.scalar_one()
+        result = await session.execute(
+            select(func.count()).select_from(Payment).where(Payment.course_id == course_id)
+        )
+        payment_count = result.scalar_one()
+
+    if enrolled_count or payment_count:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🙈 Berkitish (katalogdan yashirish)", callback_data=f"tcourse_hide:{course_id}")],
+            [InlineKeyboardButton(text="⬅️ Orqaga", callback_data=f"tcourse:{course_id}")],
+        ])
+        await callback.message.edit_text(
+            f"⚠️ \"{course.title}\" kursini o'chirib bo'lmaydi — unda allaqachon "
+            f"to'lov/sotib olish tarixi bor ({enrolled_count} ta o'quvchi).\n\n"
+            "Buning o'rniga kursni katalogdan berkitishingiz mumkin — sotib olganlar "
+            "kursga kirishda davom etadi, lekin yangi o'quvchilar uni ko'rmaydi.",
+            reply_markup=kb,
+        )
+        await callback.answer()
+        return
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Ha, o'chirish", callback_data=f"tcourse_del_yes:{course_id}"),
+        InlineKeyboardButton(text="❌ Bekor qilish", callback_data=f"tcourse:{course_id}"),
+    ]])
+    await callback.message.edit_text(
+        f"⚠️ \"{course.title}\" kursini butunlay o'chirmoqchimisiz?\n\n"
+        "Bu kursdagi barcha modul va darslar ham birga o'chib ketadi. Bu qaytarilmaydi.",
+        reply_markup=kb,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("tcourse_del_yes:"))
+async def delete_course(callback: CallbackQuery) -> None:
+    course_id = int(callback.data.split(":")[1])
+    async with async_session() as session:
+        course = await _check_course_owner(session, course_id, callback.from_user.id)
+        if not course:
+            await callback.answer("Ruxsat yo'q", show_alert=True)
+            return
+        title = course.title
+        await session.delete(course)  # cascade: modullar va darslar ham o'chadi
+        await session.commit()
+
+    await callback.message.edit_text(f"🗑 \"{title}\" kursi butunlay o'chirildi.")
+    await callback.answer("O'chirildi")
+
+
+@router.callback_query(F.data.startswith("tcourse_hide:"))
+async def hide_course(callback: CallbackQuery) -> None:
+    course_id = int(callback.data.split(":")[1])
+    async with async_session() as session:
+        course = await _check_course_owner(session, course_id, callback.from_user.id)
+        if not course:
+            await callback.answer("Ruxsat yo'q", show_alert=True)
+            return
+        course.status = CourseStatus.HIDDEN
+        await session.commit()
+        title = course.title
+
+    await callback.message.edit_text(f"🙈 \"{title}\" kursi katalogdan berkitildi.")
+    await callback.answer("Berkitildi")
 
 
 @router.callback_query(F.data.startswith("tmod_up:"))

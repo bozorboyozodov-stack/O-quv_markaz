@@ -260,7 +260,10 @@ async def all_courses_with_teacher(message: Message) -> None:
             f"📌 Holati: {status_label}\n"
             f"🗓 {fmt_date(course.created_at)}"
         )
-        await message.answer(text)
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="📂 Boshqarish (tahrirlash/o'chirish)", callback_data=f"tcourse:{course.id}"),
+        ]])
+        await message.answer(text, reply_markup=kb)
 
 
 async def _resolve_user_by_username(session, raw: str) -> User | None:
