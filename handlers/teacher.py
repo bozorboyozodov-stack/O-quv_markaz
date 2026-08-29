@@ -1079,8 +1079,9 @@ async def _render_lesson_management(callback: CallbackQuery, lesson_id: int) -> 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✏️ Nomini o'zgartirish", callback_data=f"tles_edit_title:{lesson_id}")],
         [InlineKeyboardButton(text="🎥 Videoni almashtirish", callback_data=f"tles_edit_video:{lesson_id}")],
+        [InlineKeyboardButton(text="👁 Darsni ko'rish (faqat men uchun)", callback_data=f"tles_watch:{lesson_id}")],
         [InlineKeyboardButton(
-            text=("🚫 Preview'ni bekor qilish" if lesson.is_preview else "🎁 Bepul preview qilish"),
+            text=("🚫 Preview'ni bekor qilish" if lesson.is_preview else "🎁 Bepul preview qilish (HAMMA uchun)"),
             callback_data=f"tles_preview:{lesson_id}",
         )],
         [InlineKeyboardButton(text="🗑 O'chirish", callback_data=f"ldel:{lesson_id}")],
@@ -1092,6 +1093,39 @@ async def _render_lesson_management(callback: CallbackQuery, lesson_id: int) -> 
         f"🎬 <b>{lesson.title}</b>\n{DIVIDER}\n{video_status}{preview_status}", reply_markup=kb
     )
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("tles_watch:"))
+async def watch_lesson_as_staff(callback: CallbackQuery, bot: Bot) -> None:
+    """Admin/o'qituvchi darsni FAQAT O'ZI uchun ko'rib chiqishi (masalan, moderatsiyadan
+    oldin tekshirish uchun). Bu is_preview'ni O'ZGARTIRMAYDI va boshqa hech bir
+    foydalanuvchiga ta'sir qilmaydi — video faqat shu tugmani bosgan odamga yuboriladi."""
+    lesson_id = int(callback.data.split(":")[1])
+    async with async_session() as session:
+        lesson = await session.get(Lesson, lesson_id)
+        if not lesson:
+            await callback.answer("Dars topilmadi", show_alert=True)
+            return
+        module = await session.get(Module, lesson.module_id)
+        course = await _check_course_owner(session, module.course_id, callback.from_user.id)
+        if not course:
+            await callback.answer("Ruxsat yo'q", show_alert=True)
+            return
+        if not lesson.has_video:
+            await callback.answer("Bu darsda hali video yo'q", show_alert=True)
+            return
+
+    await callback.answer("🎬 Video yuborilmoqda...")
+    await bot.copy_message(
+        chat_id=callback.from_user.id,
+        from_chat_id=lesson.video_chat_id,
+        message_id=lesson.video_message_id,
+        protect_content=True,
+    )
+    await callback.message.answer(
+        "☝️ Bu video faqat sizga (tekshirish uchun) yuborildi — boshqa hech kim uchun "
+        "bepul bo'lib qolgani yo'q."
+    )
 
 
 @router.callback_query(F.data.startswith("tles_preview:"))
@@ -1111,7 +1145,11 @@ async def toggle_lesson_preview(callback: CallbackQuery) -> None:
         await session.commit()
         new_state = lesson.is_preview
 
-    await callback.answer("🎁 Preview yoqildi" if new_state else "🚫 Preview o'chirildi")
+    await callback.answer(
+        "⚠️ DIQQAT: bu dars ENDI ISTALGAN FOYDALANUVCHIGA (sotib olmagan bo'lsa ham) "
+        "bepul ko'rinadi!" if new_state else "🚫 Preview o'chirildi — dars endi faqat sotib olganlarga ko'rinadi.",
+        show_alert=True,
+    )
     # Kartani yangilash uchun manage_lesson ekranini qayta chizamiz.
     await _render_lesson_management(callback, lesson_id)
 
