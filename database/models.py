@@ -51,6 +51,10 @@ class User(Base):
     username: Mapped[str] = mapped_column(String(255), default="")
     phone: Mapped[str] = mapped_column(String(32), default="")
     role: Mapped[RoleEnum] = mapped_column(SAEnum(RoleEnum), default=RoleEnum.STUDENT)
+    # Faqat TEACHER uchun mazmunli: o'qituvchi qaysi fan(lar)dan dars berishi
+    # (masalan: "Matematika", "Ingliz tili"). Admin o'qituvchini qo'shayotganda
+    # kiritadi, o'qituvchilar ro'yxatida shu maydon ko'rsatiladi.
+    subject: Mapped[str] = mapped_column(String(255), default="")
     is_blocked: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

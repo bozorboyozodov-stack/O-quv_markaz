@@ -6,7 +6,7 @@ from sqlalchemy import select, func
 
 from database.db import async_session
 from database.models import User, RoleEnum, Course, CourseStatus, Payment, PaymentStatus, PaymentCard, Withdrawal, WithdrawalStatus, Enrollment
-from states.teacher_states import PromoteTeacher, PromoteAdmin, AddCard, RejectWithdrawal, EditSupportContact
+from states.teacher_states import PromoteTeacher, PromoteAdmin, AddCard, RejectWithdrawal, EditSupportContact, EditTeacherSubject
 from utils.payments import (
     approve_payment, reject_payment,
     notify_student_approved, notify_student_rejected,
@@ -228,6 +228,7 @@ async def _resolve_user_by_username(session, raw: str) -> User | None:
 # ------------------------------------------------------------------
 def _teacher_manage_kb(teacher_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="📚 Fanini o'zgartirish", callback_data=f"tch_subj:{teacher_id}"),
         InlineKeyboardButton(text="🗑 Olib tashlash", callback_data=f"tch_del:{teacher_id}"),
     ]])
 
@@ -248,7 +249,8 @@ async def list_teachers(message: Message) -> None:
     else:
         await message.answer(f"👨‍🏫 <b>O'qituvchilar</b> ({len(teachers)} ta):")
         for t in teachers:
-            text = f"{t.full_name or '—'} (@{t.username or '—'})\n🆔 <code>{t.telegram_id}</code>"
+            subject_line = f"\n📚 Fan: <b>{t.subject}</b>" if t.subject else "\n📚 Fan: — (kiritilmagan)"
+            text = f"{t.full_name or '—'} (@{t.username or '—'}){subject_line}\n🆔 <code>{t.telegram_id}</code>"
             await message.answer(text, reply_markup=_teacher_manage_kb(t.id))
 
     await message.answer(
@@ -276,8 +278,7 @@ async def start_promote_teacher(callback: CallbackQuery, state: FSMContext) -> N
 
 
 @router.message(PromoteTeacher.waiting_username)
-async def finish_promote_teacher(message: Message, state: FSMContext) -> None:
-    await state.clear()
+async def promote_teacher_username_received(message: Message, state: FSMContext) -> None:
     raw = (message.text or "").strip()
     username = raw.lstrip("@")
     if not username:
@@ -292,15 +293,88 @@ async def finish_promote_teacher(message: Message, state: FSMContext) -> None:
                 "U avval botga /start bosgan va Telegram profilida username "
                 "o'rnatgan bo'lishi kerak."
             )
+            await state.clear()
             return
         if user.role == RoleEnum.TEACHER:
             await message.answer(f"ℹ️ <b>{user.full_name or username}</b> allaqachon o'qituvchi.")
+            await state.clear()
+            return
+
+    await state.update_data(username=username)
+    await state.set_state(PromoteTeacher.waiting_subject)
+    await message.answer(
+        "📚 Bu o'qituvchi qaysi fandan dars beradi?\n\n"
+        "Fan nomini yuboring (masalan: <i>Matematika</i>, <i>Ingliz tili</i>, <i>Frontend dasturlash</i>)."
+    )
+
+
+@router.message(PromoteTeacher.waiting_subject)
+async def finish_promote_teacher(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    username = data.get("username", "")
+    subject = (message.text or "").strip()
+    await state.clear()
+
+    if not subject:
+        await message.answer("⚠️ Iltimos fan nomini matn ko'rinishida yuboring.")
+        return
+
+    async with async_session() as session:
+        user = await _resolve_user_by_username(session, username)
+        if not user:
+            await message.answer(f"❌ @{username} topilmadi. Qaytadan urinib ko'ring.")
             return
         user.role = RoleEnum.TEACHER
+        user.subject = subject
         await session.commit()
         name = user.full_name or username
 
-    await message.answer(f"✅ <b>{name}</b> (@{username}) endi o'qituvchi (TEACHER) huquqiga ega.")
+    await message.answer(
+        f"✅ <b>{name}</b> (@{username}) endi o'qituvchi (TEACHER) huquqiga ega.\n"
+        f"📚 Fan: <b>{subject}</b>"
+    )
+
+
+@router.callback_query(F.data.startswith("tch_subj:"))
+async def start_edit_teacher_subject(callback: CallbackQuery, state: FSMContext) -> None:
+    admin = await _require_admin_user(callback)
+    if not admin:
+        return
+    teacher_id = int(callback.data.split(":")[1])
+    async with async_session() as session:
+        teacher = await session.get(User, teacher_id)
+        if not teacher or teacher.role != RoleEnum.TEACHER:
+            await callback.answer("O'qituvchi topilmadi", show_alert=True)
+            return
+        name = teacher.full_name or teacher.username or str(teacher.telegram_id)
+
+    await state.update_data(teacher_id=teacher_id)
+    await state.set_state(EditTeacherSubject.waiting_subject)
+    await callback.message.answer(f"📚 <b>{name}</b> uchun yangi fan nomini yuboring:")
+    await callback.answer()
+
+
+@router.message(EditTeacherSubject.waiting_subject)
+async def save_teacher_subject(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    teacher_id = data.get("teacher_id")
+    subject = (message.text or "").strip()
+    await state.clear()
+
+    if not subject:
+        await message.answer("⚠️ Iltimos fan nomini matn ko'rinishida yuboring.")
+        return
+
+    async with async_session() as session:
+        teacher = await session.get(User, teacher_id)
+        if not teacher or teacher.role != RoleEnum.TEACHER:
+            await message.answer("O'qituvchi topilmadi.")
+            return
+        teacher.subject = subject
+        await session.commit()
+        name = teacher.full_name or teacher.username or str(teacher.telegram_id)
+
+    await message.answer(f"✅ <b>{name}</b> uchun fan yangilandi: 📚 <b>{subject}</b>")
 
 
 @router.callback_query(F.data.startswith("tch_del:"))

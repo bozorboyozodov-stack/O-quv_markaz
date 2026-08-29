@@ -289,6 +289,7 @@ async def teacher_statistics(message: Message) -> None:
     lines = [
         "📊 <b>Statistika</b>",
         DIVIDER,
+        f"📚 Fan: {user.subject or '— (kiritilmagan, admin bilan bog\u2018laning)'}",
         f"📚 Kurslar: {len(courses)} ta",
         f"　✅ Faol: {approved} · 🟡 Moderatsiyada: {pending} · 🙈 Yashirin: {hidden} · ❌ Rad etilgan: {rejected}",
         f"🎥 Jami darslar: {lesson_count} ta",

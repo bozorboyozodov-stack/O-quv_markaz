@@ -10,6 +10,12 @@ class CreateCourse(StatesGroup):
 
 class PromoteTeacher(StatesGroup):
     waiting_username = State()
+    waiting_subject = State()  # o'qituvchi qaysi fandan ekanligi
+
+
+class EditTeacherSubject(StatesGroup):
+    """Admin mavjud o'qituvchining fanini keyinchalik o'zgartirmoqchi bo'lsa."""
+    waiting_subject = State()
 
 
 class PromoteAdmin(StatesGroup):

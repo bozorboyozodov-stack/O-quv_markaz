@@ -74,10 +74,14 @@ async def show_course_detail(callback: CallbackQuery) -> None:
         )
         student_count = len(result.scalars().all())
 
+    teacher_line = f"👨‍🏫 O'qituvchi: {teacher.full_name if teacher else '—'}"
+    if teacher and teacher.subject:
+        teacher_line += f" (📚 {teacher.subject})"
+
     text = (
         f"🎓 <b>{course.title}</b>\n"
         f"{DIVIDER}\n"
-        f"👨‍🏫 O'qituvchi: {teacher.full_name if teacher else '—'}\n"
+        f"{teacher_line}\n"
         f"📚 {module_count} ta modul · 🎥 {lesson_count} ta dars\n"
         f"👨‍🎓 {student_count} ta o'quvchi\n"
         f"{DIVIDER}\n"
